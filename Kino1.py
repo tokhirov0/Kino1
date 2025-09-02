@@ -12,11 +12,10 @@ CHANNELS = [
 
 bot = telebot.TeleBot(TOKEN)
 
-# Kino va seriallar
-movies = {}    # kod: {"name": str, "file_id": str}
-serials = {}   # kod: {"name": str, "parts": [{"title": str, "file_id": str}]}
+movies = {}
+serials = {}
 ad_text = ""
-users = set()  # Foydalanuvchilar id ro'yxati (broadcast uchun)
+users = set()
 
 def is_admin(user_id):
     return user_id in ADMINS
@@ -96,18 +95,17 @@ def callback_handler(call):
     elif call.data == "back_to_main":
         bot.send_message(call.message.chat.id, "Asosiy menyu", reply_markup=main_menu(user_id))
     elif call.data.startswith("get_serial_part:"):
-        # get_serial_part:<code>:<idx>
         _, code, idx = call.data.split(":")
         idx = int(idx)
         part = serials[code]["parts"][idx]
-        bot.send_document(call.message.chat.id, part["file_id"], caption=part["title"])
+        send_media_auto(call.message.chat.id, part["file_id"], caption=part["title"])
 
 def process_movie_code_user(message):
     code = message.text.strip()
     if code in movies:
         data = movies[code]
         bot.send_message(message.chat.id, f"Kino: {data['name']}")
-        bot.send_document(message.chat.id, data['file_id'])
+        send_media_auto(message.chat.id, data['file_id'], caption=data['name'])
     else:
         bot.send_message(message.chat.id, "Bunday kodli kino topilmadi.")
 
@@ -139,16 +137,32 @@ def process_movie_code(message, name):
     if code in movies:
         bot.send_message(message.chat.id, "Bu kod allaqachon mavjud! Boshqa kod tanlang.")
         return
-    msg = bot.send_message(message.chat.id, "Videoni yuklang (fayl sifatida):")
+    msg = bot.send_message(message.chat.id, "Videoni yuboring (fayl sifatida yoki boshqa kanaldan forward qiling):")
     bot.register_next_step_handler(msg, lambda m: process_movie_file(m, name, code))
+
+def extract_file_id(message):
+    # Forward qilingan yoki oddiy video/document/audio uchun file_id olish
+    if message.video:
+        return message.video.file_id
+    if message.document:
+        if getattr(message.document, 'mime_type', '') and message.document.mime_type.startswith('video'):
+            return message.document.file_id
+    if message.audio:
+        return message.audio.file_id
+    return None
+
+def send_media_auto(chat_id, file_id, caption=None):
+    try:
+        bot.send_video(chat_id, file_id, caption=caption)
+    except Exception:
+        bot.send_document(chat_id, file_id, caption=caption)
 
 def process_movie_file(message, name, code):
     admin_id = message.from_user.id
     if not is_admin(admin_id): return
-    if message.document:
-        file_id = message.document.file_id
-    else:
-        bot.send_message(message.chat.id, "Videoni fayl sifatida yuboring!")
+    file_id = extract_file_id(message)
+    if not file_id:
+        bot.send_message(message.chat.id, "Videoni fayl sifatida yuboring yoki boshqa kanaldan forward qiling!")
         return
     movies[code] = {"name": name, "file_id": file_id}
     bot.send_message(message.chat.id, f"Kino yuklandi!\nNomi: {name}\nKod: `{code}`", parse_mode="Markdown", reply_markup=admin_menu())
@@ -185,7 +199,7 @@ def process_serial_parts_count(message, code):
         return
     serials[code]["expected_parts"] = count
     serials[code]["cur_part"] = 0
-    bot.send_message(message.chat.id, f"Endi {count} ta qismlarni ketma-ket yuklang (har bir qism uchun nom va video yuklang):")
+    bot.send_message(message.chat.id, f"Endi {count} ta qismlarni ketma-ket yuklang (har bir qism uchun nom va video, fayl yoki forward qiling):")
     ask_next_serial_part(message, code)
 
 def ask_next_serial_part(message, code):
@@ -201,22 +215,20 @@ def ask_next_serial_part(message, code):
 
 def process_serial_part_title(message, code):
     title = message.text.strip()
-    msg = bot.send_message(message.chat.id, f"{title} videosini yuklang (fayl sifatida):")
+    msg = bot.send_message(message.chat.id, f"{title} videosini yuboring (fayl sifatida yoki boshqa kanaldan forward qiling):")
     bot.register_next_step_handler(msg, lambda m: process_serial_part_file(m, code, title))
 
 def process_serial_part_file(message, code, title):
     admin_id = message.from_user.id
     if not is_admin(admin_id): return
-    if message.document:
-        file_id = message.document.file_id
-    else:
-        bot.send_message(message.chat.id, "Videoni fayl sifatida yuboring!")
+    file_id = extract_file_id(message)
+    if not file_id:
+        bot.send_message(message.chat.id, "Videoni fayl sifatida yuboring yoki boshqa kanaldan forward qiling!")
         return
     serials[code]["parts"].append({"title": title, "file_id": file_id})
     serials[code]["cur_part"] += 1
     ask_next_serial_part(message, code)
 
-# =========== Reklama ==============
 def process_ad_text(message):
     global ad_text
     admin_id = message.from_user.id
@@ -239,7 +251,6 @@ def broadcast_ad(message):
             pass
     bot.send_message(message.chat.id, f"Reklama yuborildi! ({count} ta foydalanuvchiga)", reply_markup=admin_menu())
 
-# =========== Oddiy text ============
 @bot.message_handler(content_types=['text'])
 def text_handler(message):
     user_id = message.from_user.id
