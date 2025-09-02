@@ -2,7 +2,7 @@ import os
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-TOKEN = os.environ.get('TOKEN', '8344008207:AAEVYspXdqtHVmwTsQwfxBfxPmIfYtCV0FY')
+TOKEN = os.environ.get('TOKEN', 'BOT_TOKEN')
 ADMINS = [int(x) for x in os.environ.get('ADMINS', '6733100026').split(',')]
 
 CHANNELS = [
@@ -12,8 +12,11 @@ CHANNELS = [
 
 bot = telebot.TeleBot(TOKEN)
 
-movies = {}  # kod: {"name": str, "parts": [{"title": str, "file_id": str}]}
+# Kino va seriallar
+movies = {}    # kod: {"name": str, "file_id": str}
+serials = {}   # kod: {"name": str, "parts": [{"title": str, "file_id": str}]}
 ad_text = ""
+users = set()  # Foydalanuvchilar id ro'yxati (broadcast uchun)
 
 def is_admin(user_id):
     return user_id in ADMINS
@@ -31,7 +34,8 @@ def check_channels(user_id):
 def main_menu(user_id):
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("🎬 Kod orqali kino/serial olish", callback_data="get_movie"),
+        InlineKeyboardButton("🎬 Kino kodi orqali olish", callback_data="get_movie"),
+        InlineKeyboardButton("📺 Serial kodi orqali olish", callback_data="get_serial"),
     )
     if is_admin(user_id):
         markup.add(
@@ -40,10 +44,16 @@ def main_menu(user_id):
     return markup
 
 def admin_menu():
-    markup = InlineKeyboardMarkup()
+    markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("➕ Serial/kino qo‘shish", callback_data="add_movie"),
-        InlineKeyboardButton("📢 Reklama o‘rnatish", callback_data="set_ad"),
+        InlineKeyboardButton("➕ Kino qo‘shish", callback_data="add_movie"),
+        InlineKeyboardButton("➕ Serial qo‘shish", callback_data="add_serial"),
+    )
+    markup.add(
+        InlineKeyboardButton("📢 Reklama matni o‘rnatish", callback_data="set_ad"),
+        InlineKeyboardButton("🚀 Reklamani hammaga yuborish", callback_data="broadcast_ad"),
+    )
+    markup.add(
         InlineKeyboardButton("🔙 Orqaga", callback_data="back_to_main"),
     )
     return markup
@@ -51,6 +61,7 @@ def admin_menu():
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
+    users.add(user_id)
     if not check_channels(user_id):
         markup = InlineKeyboardMarkup()
         for ch in CHANNELS:
@@ -58,53 +69,65 @@ def start_handler(message):
         bot.send_message(message.chat.id, "Botdan foydalanish uchun barcha kanallarga obuna bo‘ling!", reply_markup=markup)
         return
     bot.send_message(message.chat.id, "Xush kelibsiz! Kodni yozing yoki menyudan foydalaning 👇", reply_markup=main_menu(user_id))
-    if ad_text:
-        bot.send_message(message.chat.id, ad_text)
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     user_id = call.from_user.id
+    users.add(user_id)
     if call.data == "get_movie":
-        bot.send_message(call.message.chat.id, "Kino yoki serial kodi kiriting:")
-        bot.register_next_step_handler(call.message, process_code)
+        bot.send_message(call.message.chat.id, "Kino kodi kiriting:")
+        bot.register_next_step_handler(call.message, process_movie_code_user)
+    elif call.data == "get_serial":
+        bot.send_message(call.message.chat.id, "Serial kodi kiriting:")
+        bot.register_next_step_handler(call.message, process_serial_code_user)
     elif call.data == "admin_panel" and is_admin(user_id):
         bot.send_message(call.message.chat.id, "Admin paneliga xush kelibsiz!", reply_markup=admin_menu())
     elif call.data == "add_movie" and is_admin(user_id):
-        msg = bot.send_message(call.message.chat.id, "Serial yoki kino nomini kiriting:")
-        bot.register_next_step_handler(msg, lambda m: process_movie_name(m, user_id))
+        msg = bot.send_message(call.message.chat.id, "Kino nomini kiriting:")
+        bot.register_next_step_handler(msg, process_movie_name)
+    elif call.data == "add_serial" and is_admin(user_id):
+        msg = bot.send_message(call.message.chat.id, "Serial nomini kiriting:")
+        bot.register_next_step_handler(msg, process_serial_name)
     elif call.data == "set_ad" and is_admin(user_id):
         msg = bot.send_message(call.message.chat.id, "Reklama matnini kiriting:")
         bot.register_next_step_handler(msg, process_ad_text)
+    elif call.data == "broadcast_ad" and is_admin(user_id):
+        broadcast_ad(call.message)
     elif call.data == "back_to_main":
         bot.send_message(call.message.chat.id, "Asosiy menyu", reply_markup=main_menu(user_id))
-    elif call.data.startswith("get_part:"):
-        # get_part:<code>:<idx>
+    elif call.data.startswith("get_serial_part:"):
+        # get_serial_part:<code>:<idx>
         _, code, idx = call.data.split(":")
         idx = int(idx)
-        part = movies[code]["parts"][idx]
+        part = serials[code]["parts"][idx]
         bot.send_document(call.message.chat.id, part["file_id"], caption=part["title"])
-        if ad_text:
-            bot.send_message(call.message.chat.id, ad_text)
 
-def process_code(message):
+def process_movie_code_user(message):
     code = message.text.strip()
     if code in movies:
-        parts = movies[code]["parts"]
-        name = movies[code]["name"]
-        markup = InlineKeyboardMarkup(row_width=2)
-        for idx, part in enumerate(parts):
-            markup.add(InlineKeyboardButton(part["title"], callback_data=f"get_part:{code}:{idx}"))
-        bot.send_message(message.chat.id, f"\"{name}\" serial/kino qismlari:", reply_markup=markup)
-        if ad_text:
-            bot.send_message(message.chat.id, ad_text)
+        data = movies[code]
+        bot.send_message(message.chat.id, f"Kino: {data['name']}")
+        bot.send_document(message.chat.id, data['file_id'])
     else:
-        bot.send_message(message.chat.id, "Bunday kod topilmadi. Kodni tekshirib, qayta urinib ko‘ring.")
+        bot.send_message(message.chat.id, "Bunday kodli kino topilmadi.")
 
-def process_movie_name(message, admin_id):
-    if not is_admin(admin_id):
-        return
+def process_serial_code_user(message):
+    code = message.text.strip()
+    if code in serials:
+        data = serials[code]
+        markup = InlineKeyboardMarkup(row_width=2)
+        for idx, part in enumerate(data["parts"]):
+            markup.add(InlineKeyboardButton(part["title"], callback_data=f"get_serial_part:{code}:{idx}"))
+        bot.send_message(message.chat.id, f"Serial: {data['name']}\nQismlardan birini tanlang:", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, "Bunday kodli serial topilmadi.")
+
+# =========== Kino Qo'shish ==============
+def process_movie_name(message):
+    admin_id = message.from_user.id
+    if not is_admin(admin_id): return
     name = message.text.strip()
-    msg = bot.send_message(message.chat.id, "Serial/kino uchun kod kiriting (masalan: serial123):")
+    msg = bot.send_message(message.chat.id, "Kino uchun kod kiriting (masalan: kino123):")
     bot.register_next_step_handler(msg, lambda m: process_movie_code(m, name))
 
 def process_movie_code(message, name):
@@ -116,61 +139,111 @@ def process_movie_code(message, name):
     if code in movies:
         bot.send_message(message.chat.id, "Bu kod allaqachon mavjud! Boshqa kod tanlang.")
         return
-    movies[code] = {"name": name, "parts": []}
-    msg = bot.send_message(message.chat.id, "Serial yoki kinoning nechta qismini yuklamoqchisiz? (raqam yozing, masalan: 5):")
-    bot.register_next_step_handler(msg, lambda m: process_parts_count(m, code))
+    msg = bot.send_message(message.chat.id, "Videoni yuklang (fayl sifatida):")
+    bot.register_next_step_handler(msg, lambda m: process_movie_file(m, name, code))
 
-def process_parts_count(message, code):
+def process_movie_file(message, name, code):
+    admin_id = message.from_user.id
+    if not is_admin(admin_id): return
+    if message.document:
+        file_id = message.document.file_id
+    else:
+        bot.send_message(message.chat.id, "Videoni fayl sifatida yuboring!")
+        return
+    movies[code] = {"name": name, "file_id": file_id}
+    bot.send_message(message.chat.id, f"Kino yuklandi!\nNomi: {name}\nKod: `{code}`", parse_mode="Markdown", reply_markup=admin_menu())
+
+# =========== Serial Qo'shish ==============
+def process_serial_name(message):
+    admin_id = message.from_user.id
+    if not is_admin(admin_id): return
+    name = message.text.strip()
+    msg = bot.send_message(message.chat.id, "Serial uchun kod kiriting (masalan: serial123):")
+    bot.register_next_step_handler(msg, lambda m: process_serial_code(m, name))
+
+def process_serial_code(message, name):
+    code = message.text.strip()
+    if not code or ' ' in code or not code.isalnum():
+        msg = bot.send_message(message.chat.id, "Kod faqat lotin harflari va raqamlardan iborat bo‘lishi kerak. Qayta kiriting:")
+        bot.register_next_step_handler(msg, lambda m: process_serial_code(m, name))
+        return
+    if code in serials:
+        bot.send_message(message.chat.id, "Bu kod allaqachon mavjud! Boshqa kod tanlang.")
+        return
+    serials[code] = {"name": name, "parts": []}
+    msg = bot.send_message(message.chat.id, "Serial nechta qismdan iborat? (raqam):")
+    bot.register_next_step_handler(msg, lambda m: process_serial_parts_count(m, code))
+
+def process_serial_parts_count(message, code):
     try:
         count = int(message.text.strip())
         if not (1 <= count <= 100):
             raise Exception
     except Exception:
         msg = bot.send_message(message.chat.id, "Faqat 1 dan 100 gacha bo‘lgan raqam kiriting:")
-        bot.register_next_step_handler(msg, lambda m: process_parts_count(m, code))
+        bot.register_next_step_handler(msg, lambda m: process_serial_parts_count(m, code))
         return
-    movies[code]["expected_parts"] = count
-    movies[code]["cur_part"] = 0
-    bot.send_message(message.chat.id, f"Endi {count} ta qismlarni ketma-ket yuklang (har bir qism uchun nom va fayl yuboring):")
-    ask_next_part(message, code)
+    serials[code]["expected_parts"] = count
+    serials[code]["cur_part"] = 0
+    bot.send_message(message.chat.id, f"Endi {count} ta qismlarni ketma-ket yuklang (har bir qism uchun nom va video yuklang):")
+    ask_next_serial_part(message, code)
 
-def ask_next_part(message, code):
-    cur = movies[code]["cur_part"]
-    total = movies[code]["expected_parts"]
+def ask_next_serial_part(message, code):
+    cur = serials[code]["cur_part"]
+    total = serials[code]["expected_parts"]
     if cur >= total:
-        del movies[code]["cur_part"]
-        del movies[code]["expected_parts"]
-        bot.send_message(message.chat.id, f"{movies[code]['name']} yuklandi! Kod: `{code}`", parse_mode="Markdown", reply_markup=admin_menu())
+        del serials[code]["cur_part"]
+        del serials[code]["expected_parts"]
+        bot.send_message(message.chat.id, f"{serials[code]['name']} serial yuklandi! Kod: `{code}`", parse_mode="Markdown", reply_markup=admin_menu())
         return
     msg = bot.send_message(message.chat.id, f"{cur+1}-qism nomini kiriting:")
-    bot.register_next_step_handler(msg, lambda m: process_part_title(m, code))
+    bot.register_next_step_handler(msg, lambda m: process_serial_part_title(m, code))
 
-def process_part_title(message, code):
+def process_serial_part_title(message, code):
     title = message.text.strip()
-    msg = bot.send_message(message.chat.id, f"{title} faylini yuboring (yoki fayl id):")
-    bot.register_next_step_handler(msg, lambda m: process_part_file(m, code, title))
+    msg = bot.send_message(message.chat.id, f"{title} videosini yuklang (fayl sifatida):")
+    bot.register_next_step_handler(msg, lambda m: process_serial_part_file(m, code, title))
 
-def process_part_file(message, code, title):
+def process_serial_part_file(message, code, title):
     admin_id = message.from_user.id
     if not is_admin(admin_id): return
     if message.document:
         file_id = message.document.file_id
     else:
-        file_id = message.text.strip()
-    movies[code]["parts"].append({"title": title, "file_id": file_id})
-    movies[code]["cur_part"] += 1
-    ask_next_part(message, code)
+        bot.send_message(message.chat.id, "Videoni fayl sifatida yuboring!")
+        return
+    serials[code]["parts"].append({"title": title, "file_id": file_id})
+    serials[code]["cur_part"] += 1
+    ask_next_serial_part(message, code)
 
+# =========== Reklama ==============
 def process_ad_text(message):
     global ad_text
     admin_id = message.from_user.id
     if not is_admin(admin_id): return
     ad_text = message.text.strip()
-    bot.send_message(message.chat.id, "Reklama saqlandi!", reply_markup=admin_menu())
+    bot.send_message(message.chat.id, "Reklama matni saqlandi!", reply_markup=admin_menu())
 
+def broadcast_ad(message):
+    admin_id = message.from_user.id
+    if not is_admin(admin_id): return
+    if not ad_text:
+        bot.send_message(message.chat.id, "Reklama matni yo‘q. Avval reklama matnini o‘rnating.", reply_markup=admin_menu())
+        return
+    count = 0
+    for uid in list(users):
+        try:
+            bot.send_message(uid, ad_text)
+            count += 1
+        except Exception:
+            pass
+    bot.send_message(message.chat.id, f"Reklama yuborildi! ({count} ta foydalanuvchiga)", reply_markup=admin_menu())
+
+# =========== Oddiy text ============
 @bot.message_handler(content_types=['text'])
 def text_handler(message):
     user_id = message.from_user.id
+    users.add(user_id)
     text = message.text.strip()
     if not check_channels(user_id):
         markup = InlineKeyboardMarkup()
@@ -179,11 +252,13 @@ def text_handler(message):
         bot.send_message(message.chat.id, "Botdan foydalanish uchun barcha kanallarga obuna bo‘ling!", reply_markup=markup)
         return
     if text in movies:
-        process_code(message)
+        process_movie_code_user(message)
+    elif text in serials:
+        process_serial_code_user(message)
     elif is_admin(user_id) and text.startswith("/admin"):
         bot.send_message(message.chat.id, "Admin paneli", reply_markup=admin_menu())
     else:
-        bot.send_message(message.chat.id, "Kod noto‘g‘ri. Kodni tekshirib, qayta urinib ko‘ring yoki menyudan foydalaning.", reply_markup=main_menu(user_id))
+        bot.send_message(message.chat.id, "Kod noto‘g‘ri. Kino yoki serial kodini kiriting yoki menyudan foydalaning.", reply_markup=main_menu(user_id))
 
 if __name__ == "__main__":
     print("Bot ishga tushdi!")
